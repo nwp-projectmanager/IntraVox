@@ -1726,8 +1726,10 @@ class FeedReaderService {
         $mapping = $connection['responseMapping'] ?? [];
         $items = $this->mapJsonResponse($data, $mapping, $baseUrl, $connection['name'] ?? 'REST API');
 
-        // Jira: convert issue keys to browse URLs
-        if (($connection['type'] ?? '') === 'jira') {
+        // Jira: convert issue keys to browse URLs. A composed URL is already a
+        // whole link, and basename() on one would eat everything before the
+        // last slash — so the rewrite only applies when the mapping named a field.
+        if (($connection['type'] ?? '') === 'jira' && empty($mapping['urlTemplate'])) {
             foreach ($items as &$item) {
                 if ($item['url'] && !str_contains($item['url'], '/browse/')) {
                     // URL is baseUrl/KEY from relative URL resolution, rewrite to baseUrl/browse/KEY
@@ -1822,7 +1824,7 @@ class FeedReaderService {
     private function mapJsonResponse(array $data, array $mapping, string $baseUrl, string $sourceName): array {
         // Extract items array from response using items path
         $itemsPath = $mapping['items'] ?? '';
-        $rawItems = $itemsPath ? $this->resolveJsonPath($data, $itemsPath) : $data;
+        $rawItems = $itemsPath ? $this->responses->resolvePath($data, $itemsPath) : $data;
 
         if (!is_array($rawItems)) {
             return [];
@@ -1839,25 +1841,28 @@ class FeedReaderService {
                 continue;
             }
 
-            $title = $this->resolveJsonPath($raw, $mapping['title'] ?? 'title');
+            $title = $this->responses->resolvePath($raw, $mapping['title'] ?? 'title');
             if (empty($title)) {
                 continue; // skip items without a title
             }
 
-            $url = $this->resolveJsonPath($raw, $mapping['url'] ?? 'url') ?? '';
+            $urlTemplate = $mapping['urlTemplate'] ?? '';
+            $url = $urlTemplate !== ''
+                ? $this->responses->expandUrlTemplate($urlTemplate, $raw)
+                : ($this->responses->resolvePath($raw, $mapping['url'] ?? 'url') ?? '');
             // Make relative URLs absolute
             if ($url && !str_starts_with($url, 'http')) {
                 $url = $baseUrl . '/' . ltrim($url, '/');
             }
 
-            $excerpt = $this->resolveJsonPath($raw, $mapping['excerpt'] ?? '') ?? '';
+            $excerpt = $this->responses->resolvePath($raw, $mapping['excerpt'] ?? '') ?? '';
             // Handle Atlassian Document Format (ADF) objects (Jira Cloud v3)
             if (is_array($excerpt) && ($excerpt['type'] ?? '') === 'doc') {
                 $excerpt = $this->extractAdfText($excerpt);
             }
-            $date = $this->resolveJsonPath($raw, $mapping['date'] ?? '') ?? '';
-            $image = $this->resolveJsonPath($raw, $mapping['image'] ?? '') ?? null;
-            $author = $this->resolveJsonPath($raw, $mapping['author'] ?? '') ?? null;
+            $date = $this->responses->resolvePath($raw, $mapping['date'] ?? '') ?? '';
+            $image = $this->responses->resolvePath($raw, $mapping['image'] ?? '') ?? null;
+            $author = $this->responses->resolvePath($raw, $mapping['author'] ?? '') ?? null;
 
             $items[] = [
                 'id' => 'rest-' . md5($title . $url . $date),
@@ -1888,31 +1893,6 @@ class FeedReaderService {
             $text .= ' ';
         }
         return trim($text);
-    }
-
-    /**
-     * Resolve a dot-notation path in a JSON array.
-     * E.g., "data.items" resolves $data['data']['items'].
-     * E.g., "author.name" resolves $item['author']['name'].
-     *
-     * @return mixed The resolved value, or null if path doesn't exist
-     */
-    private function resolveJsonPath(array $data, string $path): mixed {
-        if ($path === '') {
-            return null;
-        }
-
-        $keys = explode('.', $path);
-        $current = $data;
-
-        foreach ($keys as $key) {
-            if (!is_array($current) || !array_key_exists($key, $current)) {
-                return null;
-            }
-            $current = $current[$key];
-        }
-
-        return $current;
     }
 
     /**
@@ -2033,6 +2013,9 @@ class FeedReaderService {
                     'items' => $this->sanitizeJsonPath($mapping['items'] ?? ''),
                     'title' => $this->sanitizeJsonPath($mapping['title'] ?? 'title'),
                     'url' => $this->sanitizeJsonPath($mapping['url'] ?? ''),
+                    // Not a JSON path: it is a URL pattern with {path} slots, so
+                    // it keeps the punctuation sanitizeJsonPath exists to strip.
+                    'urlTemplate' => mb_substr(trim((string) ($mapping['urlTemplate'] ?? '')), 0, 512),
                     'excerpt' => $this->sanitizeJsonPath($mapping['excerpt'] ?? ''),
                     'date' => $this->sanitizeJsonPath($mapping['date'] ?? ''),
                     'image' => $this->sanitizeJsonPath($mapping['image'] ?? ''),

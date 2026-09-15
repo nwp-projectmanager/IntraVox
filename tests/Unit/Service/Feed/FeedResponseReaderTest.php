@@ -138,6 +138,22 @@ class FeedResponseReaderTest extends TestCase {
         $this->assertStringStartsWith('2026-03-05', $this->reader->normaliseDate('5 March 2026'));
     }
 
+    /**
+     * Talk and Deck timestamp in epoch seconds, and DateTime read "1757500000"
+     * as the clock time 17:57:50 in the year 0000 — so every item from those
+     * APIs sorted below the rest of the feed instead of at the top.
+     */
+    public function testEpochSecondsAreReadAsATimestamp(): void {
+        foreach ([1757500000, 1700000000] as $epoch) {
+            $this->assertSame($epoch, strtotime($this->reader->normaliseDate((string) $epoch)));
+        }
+    }
+
+    /** A bare year is a date, not an epoch: it must not land in 1970. */
+    public function testAShortNumberIsNotTreatedAsAnEpoch(): void {
+        $this->assertStringStartsNotWith('1970', $this->reader->normaliseDate('2024'));
+    }
+
     /** An unparseable date must not make the item disappear. */
     public function testAnUnparseableDateFallsBackToNowRatherThanFailing(): void {
         foreach (['', 'volstrekte onzin'] as $input) {
@@ -145,6 +161,66 @@ class FeedResponseReaderTest extends TestCase {
             $this->assertNotSame('', $out);
             $this->assertNotFalse(strtotime($out), "'$input' must still yield a usable date");
         }
+    }
+
+    public function testAUrlTemplateBuildsOneLinkOutOfSeveralFields(): void {
+        $this->assertSame(
+            '/call/a1b2c3d4#message_12345',
+            $this->reader->expandUrlTemplate('/call/{token}#message_{id}', ['token' => 'a1b2c3d4', 'id' => 12345])
+        );
+        $this->assertSame(
+            '/boards/7',
+            $this->reader->expandUrlTemplate('/boards/{board.id}', ['board' => ['id' => 7]])
+        );
+        $this->assertSame('/apps/forms', $this->reader->expandUrlTemplate('/apps/forms', ['id' => 1]));
+    }
+
+    /**
+     * A hole in the middle of the pattern would still be a link, and /call/#message_
+     * goes somewhere — just not to the item the reader clicked.
+     *
+     * false is the one that bites in practice: it is scalar, and (string) false
+     * is "", so it fills the slot with nothing unless it is refused by type.
+     * Nextcloud's own OCS payloads use it freely for "no value here".
+     */
+    public function testATemplateWithAnUnresolvedPlaceholderYieldsNoUrl(): void {
+        $template = '/call/{token}#message_{id}';
+
+        foreach ([null, '', ['a'], false, true] as $id) {
+            $item = ['token' => 'a1b2c3d4'];
+            if ($id !== null) {
+                $item['id'] = $id;
+            }
+            $this->assertSame('', $this->reader->expandUrlTemplate($template, $item), var_export($id, true));
+        }
+    }
+
+    /**
+     * The values come from an external API. A field may fill the slot it was
+     * given; it may not add path segments or a query string to the pattern.
+     */
+    public function testATemplateValueIsEncodedIntoItsOwnSlot(): void {
+        $this->assertSame(
+            '/f/..%2F..%2Fadmin%3Fx%3D1',
+            $this->reader->expandUrlTemplate('/f/{hash}', ['hash' => '../../admin?x=1'])
+        );
+    }
+
+    /**
+     * Encoding is not enough on its own. rawurlencode() leaves "." and ".."
+     * untouched — they are unreserved characters — so a value that is nothing but
+     * dots survives intact and the browser resolves it as "go up one level",
+     * moving the link elsewhere on the host without adding a character the
+     * encoder would have caught.
+     */
+    public function testATemplateValueCannotWalkUpTheUrl(): void {
+        foreach (['..', '.', '...'] as $value) {
+            $this->assertSame('', $this->reader->expandUrlTemplate('/call/{token}/x', ['token' => $value]), $value);
+        }
+
+        // Dots inside a longer value are just characters: slashes are encoded, so
+        // the value can never break out of the one segment it was given.
+        $this->assertSame('/call/a..b/x', $this->reader->expandUrlTemplate('/call/{token}/x', ['token' => 'a..b']));
     }
 
     /**

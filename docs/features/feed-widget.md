@@ -287,10 +287,30 @@ The admin maps JSON fields from the API response to feed item properties using d
 | Items path | `results` or `issues` or `data.items` | Where the array of items lives in the JSON response. Leave empty if the response itself is an array |
 | Title | `title` or `fields.summary` | Item title (required) |
 | URL | `url` or `_links.webui` | Clickable link. Relative URLs are made absolute using the base URL |
+| URL template | `/call/{token}#message_{id}` | Builds the link out of several fields instead of reading one. Used instead of URL when filled |
 | Excerpt | `body` or `fields.description` | Text excerpt (HTML is stripped, max 300 chars) |
-| Date | `created_at` or `history.lastUpdated.when` | Publication/update date |
+| Date | `created_at` or `history.lastUpdated.when` | Publication/update date. Epoch seconds are understood as well as date strings |
 | Image | `thumbnail` or `avatar_url` | Image URL (optional) |
 | Author | `author` or `history.lastUpdated.by.displayName` | Author name (optional) |
+
+**URL template:**
+
+Some APIs return the parts of a link rather than the link itself — Nextcloud Talk
+gives a conversation token and a message id, Forms a share hash. Neither is a URL
+on its own, so mapping either one produces a broken link. Write the pattern
+instead and name the fields in `{...}`:
+
+| System | URL template | Result |
+|--------|-------------|--------|
+| Talk | `/call/{token}#message_{id}` | `https://cloud.example.com/call/abc123#message_42` |
+| Forms | `/apps/forms/s/{hash}` | `https://cloud.example.com/apps/forms/s/abc123` |
+
+Placeholders take the same dot-notation paths as the other mapping fields. Each
+value is confined to the slot it was given: it is percent-encoded, so it cannot
+add a path segment or a query string, and a value consisting only of dots (`..`)
+is refused rather than allowed to walk back up the path. If a placeholder cannot
+be filled, the item keeps its place in the feed and simply renders without a
+link, rather than carrying a half-built one.
 
 **Example configurations:**
 

@@ -128,6 +128,15 @@ final class FeedResponseReader {
         if (empty($dateString)) {
             return date('c');
         }
+        // Epoch seconds are not a date DateTime can read. It parses
+        // "1757500000" as 17:57:50 in the year 0000 and rejects "1700000000"
+        // outright, so a JSON API that timestamps this way — Nextcloud Talk and
+        // Deck both do — had every item either sorting below the whole feed or
+        // falling back to "now". Nine to eleven digits is the epoch-seconds
+        // range; it keeps a bare year like "2024" out of this branch.
+        if (preg_match('/^\d{9,11}$/', $dateString) === 1) {
+            return date('c', (int) $dateString);
+        }
         // Use DateTime for proper timezone handling — ambiguous dates default to UTC
         try {
             $dt = new \DateTime($dateString, new \DateTimeZone('UTC'));
@@ -139,6 +148,80 @@ final class FeedResponseReader {
             }
             return date('c', $timestamp);
         }
+    }
+
+    /**
+     * Resolve a dot-notation path in a JSON array.
+     * E.g., "data.items" resolves $data['data']['items'].
+     * E.g., "author.name" resolves $item['author']['name'].
+     *
+     * @return mixed The resolved value, or null if path doesn't exist
+     */
+    public function resolvePath(array $data, string $path): mixed {
+        if ($path === '') {
+            return null;
+        }
+
+        $keys = explode('.', $path);
+        $current = $data;
+
+        foreach ($keys as $key) {
+            if (!is_array($current) || !array_key_exists($key, $current)) {
+                return null;
+            }
+            $current = $current[$key];
+        }
+
+        return $current;
+    }
+
+    /**
+     * Fill {field} placeholders in a URL pattern from one item.
+     *
+     * A mapping can name a field but not compose one, which is fine for an API
+     * that returns a link and useless for one that returns the PARTS of a link:
+     * Nextcloud Talk gives a conversation token and a message id, Forms a share
+     * hash. Those items rendered as href="" — and since every feed item is an
+     * anchor, clicking one took the reader to the intranet front page.
+     *
+     * Values are percent-encoded because they come from an external API: a field
+     * carrying "/" or "?x=1" fills the slot it was given rather than adding path
+     * segments or a query string to the pattern an admin wrote. Encoding alone is
+     * not enough, though — rawurlencode() leaves "." and ".." untouched, and a
+     * whole segment of dots is read by the browser as "go up one level", which
+     * moves the link somewhere else on the same host without ever adding a
+     * character the encoder would catch. Those are refused outright.
+     *
+     * Booleans are refused for a different reason: (string) false is "", which
+     * would fill the slot with nothing and quietly hand back the half-built URL
+     * this method exists to avoid.
+     *
+     * A placeholder that cannot be filled yields no URL at all. The item still
+     * appears — a Talk message is worth reading whether or not it can be linked
+     * to — it simply renders without a link (see FeedItem.vue).
+     */
+    public function expandUrlTemplate(string $template, array $item): string {
+        $missing = false;
+        $url = preg_replace_callback(
+            '/\{([a-zA-Z0-9_.]+)\}/',
+            function (array $matches) use ($item, &$missing): string {
+                $value = $this->resolvePath($item, $matches[1]);
+                if (!is_scalar($value) || is_bool($value)) {
+                    $missing = true;
+                    return '';
+                }
+                $value = (string) $value;
+                // "" fills nothing; "." and ".." survive encoding and re-point the URL.
+                if ($value === '' || preg_match('/^\.+$/', $value) === 1) {
+                    $missing = true;
+                    return '';
+                }
+                return rawurlencode($value);
+            },
+            $template
+        );
+
+        return $missing ? '' : (string) $url;
     }
 
     /**
