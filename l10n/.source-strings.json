@@ -1,6 +1,6 @@
 {
-    "count": 1381,
-    "sha256": "59dd9ab49a2bf7c8f5a4d406df10fa8c4fc76f58f69ab08045d54f497337a9b6",
+    "count": 1383,
+    "sha256": "cad65e76f77653df96c65f0c9081774d717df10f0cd83fdc21ef15a1abfcbdb6",
     "strings": [
         "— Not configured —",
         "… and {n} more",
@@ -163,6 +163,7 @@
         "Browse …",
         "Browse media …",
         "Bugs",
+        "Builds a link out of several fields. Used instead of URL field when filled.",
         "Bullet list",
         "Business",
         "Calendar",
@@ -1300,6 +1301,7 @@
         "Uploading … {size} MB",
         "Uploading ZIP file …",
         "URL field",
+        "URL template",
         "URL:",
         "Use different name",
         "Use global setting",

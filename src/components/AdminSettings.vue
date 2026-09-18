@@ -1173,6 +1173,11 @@
 										<label :for="'conn-map-url-' + index">{{ t('intravox', 'URL field') }}</label>
 										<input :id="'conn-map-url-' + index" v-model="conn.responseMapping.url" type="text" placeholder="url" />
 									</div>
+									<div class="form-group full-width">
+										<label :for="'conn-map-urltemplate-' + index">{{ t('intravox', 'URL template') }}</label>
+										<input :id="'conn-map-urltemplate-' + index" v-model="conn.responseMapping.urlTemplate" type="text" placeholder="/call/{token}#message_{id}" />
+										<span class="field-hint">{{ t('intravox', 'Builds a link out of several fields. Used instead of URL field when filled.') }}</span>
+									</div>
 									<div class="form-group">
 										<label :for="'conn-map-excerpt-' + index">{{ t('intravox', 'Excerpt field') }}</label>
 										<input :id="'conn-map-excerpt-' + index" v-model="conn.responseMapping.excerpt" type="text" placeholder="body" />
@@ -1911,7 +1916,7 @@ export default {
 					jiraEmail: c.jiraEmail || '',
 					authMethod: c.authMethod || 'bearer',
 					apiKeyHeader: c.apiKeyHeader || '',
-					responseMapping: c.responseMapping || { items: '', title: 'title', url: 'url', excerpt: '', date: '', image: '', author: '' },
+					responseMapping: c.responseMapping || { items: '', title: 'title', url: 'url', urlTemplate: '', excerpt: '', date: '', image: '', author: '' },
 					customHeaders: (c.customHeaders || []).map(h => ({ key: h.key || '', value: h.value || '' })),
 					_expanded: false,
 					_showAdvanced: false,
@@ -1940,7 +1945,7 @@ export default {
 				jiraEmail: '',
 				authMethod: 'bearer',
 				apiKeyHeader: '',
-				responseMapping: { items: '', title: 'title', url: 'url', excerpt: '', date: '', image: '', author: '' },
+				responseMapping: { items: '', title: 'title', url: 'url', urlTemplate: '', excerpt: '', date: '', image: '', author: '' },
 				customHeaders: [],
 				_expanded: true,
 				_showAdvanced: false,
@@ -2083,7 +2088,7 @@ export default {
 					jiraEmail: conn.jiraEmail || '',
 					authMethod: conn.authMethod || 'bearer',
 					apiKeyHeader: conn.apiKeyHeader || '',
-					responseMapping: conn.responseMapping || { items: '', title: 'title', url: 'url', excerpt: '', date: '', image: '', author: '' },
+					responseMapping: conn.responseMapping || { items: '', title: 'title', url: 'url', urlTemplate: '', excerpt: '', date: '', image: '', author: '' },
 					customHeaders: (conn.customHeaders || []).map(h => ({ key: h.key || '', value: h.value || '' })),
 					_expanded: false,
 					_showAdvanced: false,
@@ -2141,12 +2146,12 @@ export default {
 			const presets = {
 				jira: {
 					customEndpoint: '/rest/api/2/search?jql=ORDER+BY+updated+DESC&maxResults=20',
-					responseMapping: { items: 'issues', title: 'fields.summary', url: 'key', excerpt: 'fields.description', date: 'fields.updated', author: 'fields.assignee.displayName', image: '' },
+					responseMapping: { items: 'issues', title: 'fields.summary', url: 'key', urlTemplate: '', excerpt: 'fields.description', date: 'fields.updated', author: 'fields.assignee.displayName', image: '' },
 				},
 				confluence: {
 					authMethod: 'bearer',
 					customEndpoint: '/rest/api/content?type=page&orderby=lastmodified&limit=10&expand=history.lastUpdated',
-					responseMapping: { items: 'results', title: 'title', url: '_links.webui', excerpt: '', date: 'history.lastUpdated.when', author: 'history.lastUpdated.by.displayName', image: '' },
+					responseMapping: { items: 'results', title: 'title', url: '_links.webui', urlTemplate: '', excerpt: '', date: 'history.lastUpdated.when', author: 'history.lastUpdated.by.displayName', image: '' },
 				},
 				sharepoint: {
 					baseUrl: 'https://graph.microsoft.com',
@@ -2155,17 +2160,17 @@ export default {
 				openproject: {
 					authMethod: 'basic',
 					customEndpoint: '/api/v3/work_packages?sortBy=[["updatedAt","desc"]]&pageSize=20',
-					responseMapping: { items: '_embedded.elements', title: 'subject', url: '_links.self.href', excerpt: 'description.raw', date: 'updatedAt', author: '_links.assignee.title', image: '' },
+					responseMapping: { items: '_embedded.elements', title: 'subject', url: '_links.self.href', urlTemplate: '', excerpt: 'description.raw', date: 'updatedAt', author: '_links.assignee.title', image: '' },
 				},
 				afas: {
 					authMethod: 'bearer',
 					customEndpoint: '/profitrestservices/connectors/',
-					responseMapping: { items: 'rows', title: 'Naam', url: '', excerpt: '', date: '', author: '', image: '' },
+					responseMapping: { items: 'rows', title: 'Naam', url: '', urlTemplate: '', excerpt: '', date: '', author: '', image: '' },
 				},
 				topdesk: {
 					authMethod: 'bearer',
 					customEndpoint: '/tas/api/incidents?pageSize=20&order_by=creation_date+desc',
-					responseMapping: { items: '', title: 'briefDescription', url: '_links.self.href', excerpt: '', date: 'creationDate', author: 'caller.dynamicName', image: '' },
+					responseMapping: { items: '', title: 'briefDescription', url: '_links.self.href', urlTemplate: '', excerpt: '', date: 'creationDate', author: 'caller.dynamicName', image: '' },
 				},
 			}
 			const preset = presets[conn.type]
@@ -2180,7 +2185,7 @@ export default {
 			// Reset custom fields for LMS types (they don't use custom endpoint/mapping)
 			if (['moodle', 'canvas', 'brightspace'].includes(conn.type)) {
 				conn.customEndpoint = ''
-				conn.responseMapping = { items: '', title: 'title', url: 'url', excerpt: '', date: '', image: '', author: '' }
+				conn.responseMapping = { items: '', title: 'title', url: 'url', urlTemplate: '', excerpt: '', date: '', image: '', author: '' }
 			}
 		},
 		isJiraCloud(conn) {
