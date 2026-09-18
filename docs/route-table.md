@@ -8,10 +8,11 @@ diff rather than staying buried in 14 controllers.
 
 175 routes.
 
-- **admin**: 13
-- **admin (checked in body)**: 23
+- **admin**: 12
+- **admin (checked in body)**: 22
 - **anonymous**: 17
-- **any logged-in user**: 122
+- **team folder admin (checked in body)**: 6
+- **any logged-in user**: 118
 
 | Verb | URL | Handler | Requires | CSRF |
 |---|---|---|---|---|
@@ -89,12 +90,12 @@ diff rather than staying buried in 14 controllers.
 | POST | `/api/settings/publication` | `settingsApi#setPublicationSettings` | admin (checked in body) | required |
 | GET | `/api/settings/public-share-people` | `settingsApi#getPublicSharePeopleSetting` | any logged-in user | exempt |
 | POST | `/api/settings/public-share-people` | `settingsApi#setPublicSharePeopleSetting` | admin (checked in body) | required |
-| GET | `/api/export/languages` | `export#getExportableLanguages` | any logged-in user | exempt |
-| GET | `/api/export/language/{language}` | `export#exportLanguage` | any logged-in user | exempt |
-| GET | `/api/export/language/{language}/zip` | `export#exportLanguageZip` | any logged-in user | exempt |
-| GET | `/api/export/page/{uniqueId}` | `export#exportPage` | any logged-in user | exempt |
-| POST | `/api/import/zip` | `importApi#import_zip` | admin (checked in body) | required |
-| POST | `/api/import/confluence/html` | `importApi#import_confluence_html` | admin (checked in body) | required |
+| GET | `/api/export/languages` | `export#getExportableLanguages` | team folder admin (checked in body) | required |
+| GET | `/api/export/language/{language}` | `export#exportLanguage` | team folder admin (checked in body) | required |
+| GET | `/api/export/language/{language}/zip` | `export#exportLanguageZip` | team folder admin (checked in body) | required |
+| GET | `/api/export/page/{uniqueId}` | `export#exportPage` | team folder admin (checked in body) | required |
+| POST | `/api/import/zip` | `importApi#import_zip` | team folder admin (checked in body) | required |
+| POST | `/api/import/confluence/html` | `importApi#import_confluence_html` | team folder admin (checked in body) | required |
 | GET | `/api/pages/{pageId}/comments` | `comment#getComments` | any logged-in user | exempt |
 | POST | `/api/pages/{pageId}/comments` | `comment#createComment` | any logged-in user | required |
 | PUT | `/api/comments/{commentId}` | `comment#updateComment` | any logged-in user | required |
@@ -149,7 +150,7 @@ diff rather than staying buried in 14 controllers.
 | GET | `/api/feed/jira-projects/{connectionId}` | `feedReader#getJiraProjects` | any logged-in user | exempt |
 | GET | `/api/feed/moodle-forums/{connectionId}` | `feedReader#getMoodleForums` | any logged-in user | exempt |
 | GET | `/api/settings/feed-connections` | `feedReader#getConnections` | any logged-in user | exempt |
-| POST | `/api/settings/feed-connections` | `feedReader#setConnections` | admin | required |
+| POST | `/api/settings/feed-connections` | `feedReader#setConnections` | admin (checked in body) | required |
 | GET | `/api/lms/connections` | `lmsOAuth#getUserConnections` | any logged-in user | exempt |
 | POST | `/api/lms/connect/{connectionId}` | `lmsOAuth#startOAuth` | any logged-in user | required |
 | GET | `/api/lms/callback` | `lmsOAuth#callback` | any logged-in user | exempt |

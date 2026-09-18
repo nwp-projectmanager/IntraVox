@@ -114,7 +114,21 @@ class PageTemplateService {
     /**
      * Full content of one template, or null when absent/invalid.
      */
+    /**
+     * A template id is a plain folder-name slug. Rejecting anything else stops
+     * it from escaping the _templates folder: the raw id reaches Folder::get()
+     * and Folder::delete(), so '.' (URL-encoded %2e) resolved to the _templates
+     * folder itself and a DELETE wiped every template in the language.
+     * '' / '.' / '..' / any '/' are refused.
+     */
+    private function isValidTemplateId(string $templateId): bool {
+        return $templateId !== '' && (bool)preg_match('/^[a-zA-Z0-9_-]+$/', $templateId);
+    }
+
     public function getTemplate(Folder $languageFolder, string $templateId): ?array {
+        if (!$this->isValidTemplateId($templateId)) {
+            return null;
+        }
         $templatesFolder = $this->templatesFolder($languageFolder);
         if ($templatesFolder === null) {
             return null;
@@ -155,6 +169,9 @@ class PageTemplateService {
      */
     public function deleteTemplate(Folder $languageFolder, string $templateId): array {
         try {
+            if (!$this->isValidTemplateId($templateId)) {
+                return ['success' => false, 'error' => 'Template not found'];
+            }
             $templatesFolder = $this->templatesFolder($languageFolder);
             if ($templatesFolder === null) {
                 return ['success' => false, 'error' => 'Templates folder not accessible'];
@@ -195,12 +212,44 @@ class PageTemplateService {
     }
 
     /**
+     * Whether this user may delete the given template: the delete permission on
+     * the template's own folder, in the user's ACL-filtered view.
+     *
+     * The controller gates saveAsTemplate on canCreateTemplates() but deleteTemplate
+     * gated on nothing at the app layer, so any member whose base group permission
+     * included delete (typically 7) could remove any template regardless of a per-user
+     * ACL rule that revoked it. This is the delete-side companion: it answers against
+     * the exact folder that delete() would remove, so an ACL revoking delete on
+     * `_templates` (or on the specific template) is honoured. A missing/invalid
+     * template or an unreadable `_templates` reads as "no" — never as "unset, so allow".
+     */
+    public function canDeleteTemplate(Folder $languageFolder, string $templateId): bool {
+        try {
+            if (!$this->isValidTemplateId($templateId)) {
+                return false;
+            }
+
+            $templatesFolder = $this->templatesFolder($languageFolder);
+            if ($templatesFolder === null || !$templatesFolder->nodeExists($templateId)) {
+                return false;
+            }
+
+            return $templatesFolder->get($templateId)->isDeletable();
+        } catch (\Exception $e) {
+            return false;
+        }
+    }
+
+    /**
      * Reserve a collision-free template folder — creating `_templates` when
      * missing — plus its `_media` subfolder.
      *
      * @return array{0:string, 1:Folder, 2:Folder} [finalId, templateFolder, mediaFolder]
      */
     public function newTemplateFolder(Folder $languageFolder, string $desiredId): array {
+        if (!$this->isValidTemplateId($desiredId)) {
+            throw new \InvalidArgumentException('Invalid template id');
+        }
         if (!$languageFolder->nodeExists('_templates')) {
             $languageFolder->newFolder('_templates');
         }

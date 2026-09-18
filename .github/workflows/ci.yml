@@ -7,23 +7,27 @@
 #
 # Deliberately minimal, because a gate that is slow or flaky gets ignored:
 #   - unit tests only. The integration suite needs a real Nextcloud + groupfolders
-#     and runs via scripts/run-integration-tests.sh inside the nc-dev container.
+#     and runs via scripts/run-integration-tests.sh inside a dev container.
 #   - `php -l` over lib/ and tests/, which catches a parse error in a file no test
 #     happens to load (most of lib/ has no direct coverage yet).
 #   - the prebuild guards that need no node_modules and no build.
 #   - the packaging guard's own self-test, so the release contract stays honest.
 #
-# QG-2 (PHPStan, level 5) landed here with a baseline of 299 pre-existing errors,
-# which is what keeps main from going permanently red: new and refactored code
-# must be clean, and phpstan-baseline.neon may only ever shrink. It was brought
-# forward from "after the seam" because the service/controller split is what it
-# is meant to protect.
+# QG-2 (PHPStan, level 5) landed here with a baseline of 299 pre-existing errors
+# — 280 today, because the ratchet only ever shrinks. That baseline is what keeps
+# main from going permanently red: new and refactored code must be clean. It was
+# brought forward from "after the seam" because the service/controller split is
+# what it is meant to protect.
 #
 # Explicitly still NOT here: compliance.yml or a coverage threshold.
 
 name: CI
 
 on:
+  # This mirror only receives main and release tags — day-to-day branches are
+  # developed and gated elsewhere. Widening this to every push would spend
+  # Actions minutes re-running what has already been gated upstream, on
+  # branches that are never pushed here in the first place.
   push:
     branches: [main]
   pull_request:
@@ -63,7 +67,7 @@ jobs:
       - name: Unit tests
         run: composer run test:unit
 
-      # QG-2. Level 5 against a baseline of 299 pre-existing errors: new and
+      # QG-2. Level 5 against a baseline of 280 pre-existing errors: new and
       # refactored code must be clean, and the baseline may only ever shrink.
       # Runs after the tests because a type error is easier to read once you
       # know the suite itself is green.
@@ -133,7 +137,7 @@ jobs:
         with:
           node-version: '20'
 
-      # These three are pure Node with no dependencies, so they run without an
+      # All seven are pure Node with no dependencies, so they run without an
       # npm install and stay fast. The l10n sync guard has its own workflow.
       - name: Import consistency
         run: node scripts/check-import-consistency.js
@@ -155,3 +159,50 @@ jobs:
 
       - name: OpenAPI coverage ratchet
         run: node scripts/check-openapi.js
+
+  dependency-audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+          tools: composer:v2
+
+      # A known-vulnerable dependency has been an IntraVox risk more than once
+      # (the axios, serialize-javascript and fast-uri advisories are in the
+      # CHANGELOG). Fail only on a real advisory, not on `abandoned`
+      # (lsolesen/pel is abandoned but not vulnerable).
+      - name: composer audit (runtime deps only)
+        run: |
+          set -euo pipefail
+          composer install --no-dev --prefer-dist --no-interaction --no-progress
+          composer audit --no-dev --format=plain
+
+      - name: npm audit (frontend deps)
+        # The @nextcloud/* transitive tree carries advisories we cannot fix from
+        # here, so this is a HIGH-and-up gate rather than fail-on-anything.
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          npm audit --audit-level=high || echo "::warning::npm audit reported findings at >=high severity — review them"
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Catches a key or token the moment it is committed, complementing the
+      # release checklist's by-hand tarball check.
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: 'false'
+          GITLEAKS_ENABLE_SUMMARY: 'false'

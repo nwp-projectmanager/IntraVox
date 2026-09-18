@@ -268,6 +268,20 @@ class PublicShareService {
     }
 
     /**
+     * Validate a share token's SHAPE (not its existence): NC share tokens are
+     * 10-32 alphanumeric characters. A cheap gate before any lookup, shared by
+     * PageController and PublicShareController which used to carry byte-identical
+     * private copies (Phase 6).
+     */
+    public function isValidShareTokenFormat(?string $token): bool {
+        if ($token === null || $token === '') {
+            return false;
+        }
+        // NC share tokens are alphanumeric, typically 15-20 chars
+        return strlen($token) >= 10 && strlen($token) <= 32 && ctype_alnum($token);
+    }
+
+    /**
      * Resolve a token to an IntraVox link share, or null. (SHARE-ROOT)
      *
      * This is THE gate for every anonymous endpoint. getShareByToken() used to
@@ -871,6 +885,22 @@ class PublicShareService {
                 return ['valid' => false, 'reason' => 'out_of_scope'];
             }
 
+            // Being inside the shared PATH is not the same as being visible
+            // to the sharer. The scope check above uses the GroupFolder STORAGE
+            // filecache (a system view that ignores per-user ACL), so a page in an
+            // ACL-denied subtree of the share still matches the prefix. Re-resolve
+            // the page through the SHARE OWNER's ACL-filtered view: if the owner
+            // cannot see it, an anonymous visitor of their share must not either.
+            // The tree route already does this via the owner's node; the page,
+            // media and news routes go through here.
+            $pageNode = $pageInfo['node'] ?? null;
+            if ($pageNode !== null && !$this->shareOwnerCanRead($share, $pageNode->getId())) {
+                $this->logger->warning('[PublicShareService] validateShareAccess: page hidden from the share owner by ACL', [
+                    'reason' => 'acl_denied_for_owner',
+                ]);
+                return ['valid' => false, 'reason' => 'out_of_scope'];
+            }
+
             $this->logger->debug('[PublicShareService] validateShareAccess: SUCCESS', [
                 'pageTitle' => $pageInfo['data']['title'] ?? 'unknown'
             ]);
@@ -906,6 +936,35 @@ class PublicShareService {
                 'trace' => $e->getTraceAsString()
             ]);
             return ['valid' => false, 'reason' => 'error'];
+        }
+    }
+
+    /**
+     * Whether the share OWNER can read the file with the given id, in their own
+     * ACL-filtered view.
+     *
+     * getById() on the owner's user folder returns nothing when a GroupFolders
+     * Advanced-Permissions rule hides the file from them — the same signal the
+     * tree route relies on. Fails closed: any resolution error reads as "cannot
+     * read", so a share never serves more than its owner can see. A fileId of 0
+     * (unknown) is treated as not-readable for the same reason.
+     */
+    private function shareOwnerCanRead(IShare $share, int $fileId): bool {
+        if ($fileId <= 0) {
+            return false;
+        }
+        try {
+            $ownerId = $share->getShareOwner();
+            if ($ownerId === '' ) {
+                return false;
+            }
+            $ownerFolder = $this->rootFolder->getUserFolder($ownerId);
+            return $ownerFolder->getById($fileId) !== [];
+        } catch (\Throwable $e) {
+            $this->logger->debug('[PublicShareService] shareOwnerCanRead failed, denying', [
+                'error' => $e->getMessage(),
+            ]);
+            return false;
         }
     }
 

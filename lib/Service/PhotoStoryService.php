@@ -475,6 +475,14 @@ class PhotoStoryService {
 			$slicePrimitives = array_slice($slicePrimitives, 0, $pageSize);
 		}
 
+		// Per-file ACL guard. The scope query restricts by storage + path prefix
+		// on the file cache (cheap, structural), but inside a groupfolder Nextcloud
+		// enforces per-sub-path ACLs, which that query does not. Re-check each file
+		// against the caller's own view (page-sized getById, so bounded) so only
+		// files the user may read are hydrated. The MetaVox branch already does this.
+		// An empty result flows through the rest of this method unchanged.
+		$slicePrimitives = $this->filterReadableByUser($userFolder, $slicePrimitives);
+
 		$sliceIds = array_map(fn(array $r) => $r['file_id'], $slicePrimitives);
 
 		$ncMeta = $this->ncMeta->read($sliceIds);
@@ -1178,6 +1186,35 @@ class PhotoStoryService {
 	 *    capped at N files per request. Only relevant when neither NC nor MetaVox
 	 *    has indexed the file (very old uploads on systems without a scan run).
 	 *
+	 * Keep only the slice rows the user can actually read, by resolving each
+	 * file id through the user's own folder (ACL-aware). Mirrors the per-file
+	 * getById() guard the MetaVox branch already performs. Bounded to
+	 * the page-sized slice. A single bad id never breaks the page; on an
+	 * unexpected error for a row it is dropped (fail closed), since this is the
+	 * only ACL check on the default listing branch.
+	 *
+	 * @param array<int, array<string, mixed>> $primitives
+	 * @return array<int, array<string, mixed>>
+	 */
+	private function filterReadableByUser(Folder $userFolder, array $primitives): array {
+		$out = [];
+		foreach ($primitives as $prim) {
+			$id = (int)($prim['file_id'] ?? 0);
+			if ($id <= 0) {
+				continue;
+			}
+			try {
+				if (!empty($userFolder->getById($id))) {
+					$out[] = $prim;
+				}
+			} catch (\Throwable $e) {
+				// Drop this row; a per-id failure must not leak or crash the page.
+			}
+		}
+		return $out;
+	}
+
+	/**
 	 * @param array<string, string> $mv MetaVox field_name => value
 	 * @param array<string, mixed> $nc NC core normalized payload (taken_at, gps, camera, width, height)
 	 * @return array<string, mixed>

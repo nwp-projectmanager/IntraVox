@@ -244,7 +244,11 @@ class FeedReaderService {
                 'items' => [],
                 'source' => '',
                 'cached' => false,
-                'error' => $e->getMessage(),
+                // Return a fixed generic string rather than the raw exception text:
+                // the underlying validator's distinct messages would otherwise reveal
+                // whether a host resolves and how, so the detail stays in the log
+                // above only.
+                'error' => 'Failed to fetch feed',
             ];
         }
     }

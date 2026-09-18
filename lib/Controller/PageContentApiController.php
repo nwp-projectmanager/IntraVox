@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace OCA\IntraVox\Controller;
 
-use OCA\IntraVox\Service\PageService;
+use OCA\IntraVox\Exception\PageNotFoundException;
 use OCP\App\IAppManager;
 use OCP\AppFramework\Controller;
 use OCP\AppFramework\Http;
@@ -32,9 +32,19 @@ class PageContentApiController extends Controller {
     public function __construct(
         string $appName,
         IRequest $request,
-        private PageService $pageService,
+        // The five version-history endpoints call the VERSION domain service
+        // directly (facade elimination phase 1); the cache-status endpoint calls
+        // its own service (fase-4 C5); getPage comes from the READ-domain service
+        // (fase-4 C6); metadata now goes straight to the METADATA domain service
+        // (fase-9). The RequiresPagePermission gate runs entirely on that read
+        // service, so the PageService facade this controller used to hold purely
+        // for the gate's (now-removed) accessor is gone (fase-9).
+        private \OCA\IntraVox\Service\Read\PageReadService $pageRead,
+        private \OCA\IntraVox\Service\Version\PageVersionDomainService $versionDomain,
+        private \OCA\IntraVox\Service\Maintenance\PageCacheStatusService $cacheStatus,
         private IAppManager $appManager,
         private LoggerInterface $logger,
+        private \OCA\IntraVox\Service\Metadata\PageMetadataService $pageMetadata,
     ) {
         parent::__construct($appName, $request);
     }
@@ -43,8 +53,8 @@ class PageContentApiController extends Controller {
         return $this->logger;
     }
 
-    protected function getPageService(): PageService {
-        return $this->pageService;
+    protected function getPageReadService(): \OCA\IntraVox\Service\Read\PageReadService {
+        return $this->pageRead;
     }
     /**
      */
@@ -56,22 +66,23 @@ class PageContentApiController extends Controller {
         try {
             // First get the page to check permissions (from Nextcloud filesystem)
             $this->logger->info('[ApiController::getPageVersions] Getting page...');
-            $existingPage = $this->pageService->getPage($pageId);
+            $existingPage = $this->pageRead->getPage($pageId);
             $this->logger->info('[ApiController::getPageVersions] Got page, checking permissions...');
 
-            // Check read permission using Nextcloud's permissions
-            if (!($existingPage['permissions']['canRead'] ?? false)) {
+            if (($denied = $this->denyUnlessReadable($existingPage)) !== null) {
                 $this->logger->warning('[ApiController::getPageVersions] Access denied for pageId: ' . $pageId);
-                return new DataResponse(
-                    ['error' => 'Access denied'],
-                    Http::STATUS_FORBIDDEN
-                );
+                return $denied;
             }
 
-            $this->logger->info('[ApiController::getPageVersions] Calling pageService->getPageVersions...');
-            $versions = $this->pageService->getPageVersions($pageId);
+            $this->logger->info('[ApiController::getPageVersions] Calling versionDomain->getPageVersions...');
+            $versions = $this->versionDomain->getPageVersions($pageId);
             $this->logger->info('[ApiController::getPageVersions] Got ' . count($versions) . ' versions');
             return new DataResponse($versions);
+        } catch (PageNotFoundException $e) {
+            return new DataResponse(
+                ['error' => 'Page not found'],
+                Http::STATUS_NOT_FOUND
+            );
         } catch (\Exception $e) {
             $this->logger->error('[ApiController::getPageVersions] Error: ' . $e->getMessage());
             return new DataResponse(
@@ -91,8 +102,13 @@ class PageContentApiController extends Controller {
                 return $existingPage;
             }
 
-            $page = $this->pageService->restorePageVersion($pageId, (int)$timestamp);
+            $page = $this->versionDomain->restorePageVersion($pageId, (int)$timestamp);
             return new DataResponse($page);
+        } catch (PageNotFoundException $e) {
+            return new DataResponse(
+                ['error' => 'Page not found'],
+                Http::STATUS_NOT_FOUND
+            );
         } catch (\Exception $e) {
             return new DataResponse(
                 ['error' => $e->getMessage()],
@@ -112,8 +128,13 @@ class PageContentApiController extends Controller {
             }
 
             $label = $this->request->getParam('label');
-            $this->pageService->updateVersionLabel($pageId, (int)$timestamp, $label);
+            $this->versionDomain->updateVersionLabel($pageId, (int)$timestamp, $label);
             return new DataResponse(['success' => true]);
+        } catch (PageNotFoundException $e) {
+            return new DataResponse(
+                ['error' => 'Page not found'],
+                Http::STATUS_NOT_FOUND
+            );
         } catch (\Exception $e) {
             return new DataResponse(
                 ['error' => $e->getMessage()],
@@ -128,18 +149,19 @@ class PageContentApiController extends Controller {
     public function getVersionContent(string $pageId, string $timestamp): DataResponse {
         try {
             // First get the page to check permissions (from Nextcloud filesystem)
-            $existingPage = $this->pageService->getPage($pageId);
+            $existingPage = $this->pageRead->getPage($pageId);
 
-            // Check read permission using Nextcloud's permissions
-            if (!($existingPage['permissions']['canRead'] ?? false)) {
-                return new DataResponse(
-                    ['error' => 'Access denied'],
-                    Http::STATUS_FORBIDDEN
-                );
+            if (($denied = $this->denyUnlessReadable($existingPage)) !== null) {
+                return $denied;
             }
 
-            $content = $this->pageService->getVersionContent($pageId, (int)$timestamp);
+            $content = $this->versionDomain->getVersionContent($pageId, (int)$timestamp);
             return new DataResponse($content);
+        } catch (PageNotFoundException $e) {
+            return new DataResponse(
+                ['error' => 'Page not found'],
+                Http::STATUS_NOT_FOUND
+            );
         } catch (\Exception $e) {
             return new DataResponse(
                 ['error' => $e->getMessage()],
@@ -154,18 +176,19 @@ class PageContentApiController extends Controller {
     public function getCurrentPageContent(string $pageId): DataResponse {
         try {
             // First get the page to check permissions (from Nextcloud filesystem)
-            $existingPage = $this->pageService->getPage($pageId);
+            $existingPage = $this->pageRead->getPage($pageId);
 
-            // Check read permission using Nextcloud's permissions
-            if (!($existingPage['permissions']['canRead'] ?? false)) {
-                return new DataResponse(
-                    ['error' => 'Access denied'],
-                    Http::STATUS_FORBIDDEN
-                );
+            if (($denied = $this->denyUnlessReadable($existingPage)) !== null) {
+                return $denied;
             }
 
-            $content = $this->pageService->getCurrentPageContent($pageId);
+            $content = $this->versionDomain->getCurrentPageContent($pageId);
             return new DataResponse($content);
+        } catch (PageNotFoundException $e) {
+            return new DataResponse(
+                ['error' => 'Page not found'],
+                Http::STATUS_NOT_FOUND
+            );
         } catch (\Exception $e) {
             return new DataResponse(
                 ['error' => $e->getMessage()],
@@ -180,18 +203,19 @@ class PageContentApiController extends Controller {
     public function getPageMetadata(string $pageId): DataResponse {
         try {
             // First get the page to check permissions (from Nextcloud filesystem)
-            $existingPage = $this->pageService->getPage($pageId);
+            $existingPage = $this->pageRead->getPage($pageId);
 
-            // Check read permission using Nextcloud's permissions
-            if (!($existingPage['permissions']['canRead'] ?? false)) {
-                return new DataResponse(
-                    ['error' => 'Access denied'],
-                    Http::STATUS_FORBIDDEN
-                );
+            if (($denied = $this->denyUnlessReadable($existingPage)) !== null) {
+                return $denied;
             }
 
-            $metadata = $this->pageService->getPageMetadata($pageId);
+            $metadata = $this->pageMetadata->getPageMetadata($pageId);
             return new DataResponse($metadata);
+        } catch (PageNotFoundException $e) {
+            return new DataResponse(
+                ['error' => 'Page not found'],
+                Http::STATUS_NOT_FOUND
+            );
         } catch (\Exception $e) {
             return new DataResponse(
                 ['error' => $e->getMessage()],
@@ -211,8 +235,13 @@ class PageContentApiController extends Controller {
             }
 
             $metadata = $this->request->getParams();
-            $updated = $this->pageService->updatePageMetadata($pageId, $metadata);
+            $updated = $this->pageMetadata->updatePageMetadata($pageId, $metadata);
             return new DataResponse($updated);
+        } catch (PageNotFoundException $e) {
+            return new DataResponse(
+                ['error' => 'Page not found'],
+                Http::STATUS_NOT_FOUND
+            );
         } catch (\Exception $e) {
             return new DataResponse(
                 ['error' => $e->getMessage()],
@@ -291,7 +320,7 @@ class PageContentApiController extends Controller {
     #[NoCSRFRequired]
     public function checkPageCacheStatus(string $pageId): DataResponse {
         try {
-            $status = $this->pageService->checkPageCacheStatus($pageId);
+            $status = $this->cacheStatus->checkPageCacheStatus($pageId);
             return new DataResponse($status);
         } catch (\Exception $e) {
             return new DataResponse(

@@ -22,7 +22,7 @@ class ImportService {
     private const LOG_PREFIX = '[ImportService]';
 
     public function __construct(
-        private PageService $pageService,
+        private \OCA\IntraVox\Service\Cache\PageCacheInvalidator $cacheInvalidator,
         private SetupService $setupService,
         private CommentService $commentService,
         private NavigationService $navigationService,
@@ -34,7 +34,8 @@ class ImportService {
         private PageIndexService $pageIndexService,
         private PageShapeSanitizer $shapeSanitizer,
         private SafeZipExtractor $zipExtractor,
-        private ImportNavigationBuilder $navigationBuilder
+        private ImportNavigationBuilder $navigationBuilder,
+        private \OCA\IntraVox\Service\Sanitize\MediaSanitizer $mediaSanitizer
     ) {}
 
     /**
@@ -136,7 +137,17 @@ class ImportService {
             $this->logger->info(self::LOG_PREFIX . ' Confluence import detected', ['pages' => count($pages)]);
         }
 
+        // The language comes straight from the imported file and is used to build
+        // folder paths (getLanguageFolder / nodeExists), so it must be a plain
+        // language code — the same shape the rest of the app enforces — rather
+        // than trusted as-is.
         $language = $exportData['language'] ?? 'nl';
+        if (!is_string($language) || !preg_match('/^[a-z]{2,3}$/', $language)) {
+            throw new InvalidImportException(
+                InvalidImportException::CODE_INVALID_JSON,
+                'Invalid language code in import file.'
+            );
+        }
 
         // Check for MetaVox data
         $hasMetaVoxData = isset($exportData['metavox']);
@@ -274,13 +285,13 @@ class ImportService {
         }
 
         // Cleanup
-        $this->cleanupTempDir($tempDir);
+        \OCA\IntraVox\Service\Import\TempDir::cleanup($tempDir);
 
         // Flush distributed caches so the freshly imported pages appear
         // in tree, navigation and permission lookups immediately. Without
         // this the import "succeeds" but the new pages are invisible for
         // up to 5 minutes (PR-3 distributed tree TTL).
-        $this->pageService->invalidateAllCaches();
+        $this->cacheInvalidator->invalidate();
 
         $this->logger->info(self::LOG_PREFIX . ' Import complete', $stats);
 
@@ -819,7 +830,7 @@ class ImportService {
 
         if (isset($content['description']) && is_string($content['description'])) {
             // Plain text in the template picker, so strip markup rather than
-            // trusting it: this is the one preserved field an attacker controls.
+            // trusting it: this is the one preserved field taken from import input.
             $sanitized['description'] = mb_substr(
                 strip_tags($content['description']),
                 0,
@@ -926,21 +937,33 @@ class ImportService {
                     $relativePath = substr($item->getPathname(), strlen($tempDir) + 1);
 
                     try {
+                        // The import writes into _media/_resources, so apply the same
+                        // safeguards as a normal upload: refuse executable/active types
+                        // and sanitise SVG content before writing, rather than trusting
+                        // the archive's contents.
+                        $fileName = $item->getFilename();
+                        $content = $this->safeMediaContent($item->getPathname(), $fileName);
+                        if ($content === null) {
+                            $this->logger->warning('Import skipped a disallowed media file', [
+                                'file' => $relativePath,
+                            ]);
+                            continue;
+                        }
+
                         // Ensure folder path exists (including nested folders in _resources)
                         $targetFolder = $this->ensureFolderPath($intraVoxFolder, dirname($relativePath));
 
                         // Copy file
-                        $fileName = $item->getFilename();
                         $fileExists = $targetFolder->nodeExists($fileName);
 
                         if (!$fileExists) {
                             // File doesn't exist, create new
-                            $targetFolder->newFile($fileName, file_get_contents($item->getPathname()));
+                            $targetFolder->newFile($fileName, $content);
                             $count++;
                         } elseif ($overwrite) {
                             // File exists but overwrite is enabled
                             $existingFile = $targetFolder->get($fileName);
-                            $existingFile->putContent(file_get_contents($item->getPathname()));
+                            $existingFile->putContent($content);
                             $count++;
                         }
                         // If file exists and overwrite is disabled, skip silently
@@ -956,6 +979,48 @@ class ImportService {
         }
 
         return $count;
+    }
+
+    /**
+     * File extensions that must never be written into _media/_resources by an
+     * import — server-executable or active-document types that would be a
+     * unsafe to serve. Everything else (images,
+     * video, fonts, css, pdf, and the SVG we sanitise below) is allowed, so a
+     * legitimate export round-trips.
+     */
+    private const IMPORT_FORBIDDEN_EXTENSIONS = [
+        'php', 'phtml', 'php3', 'php4', 'php5', 'phar', 'pht',
+        'html', 'htm', 'xhtml', 'shtml', 'js', 'mjs', 'jsp', 'asp', 'aspx',
+        'exe', 'sh', 'bat', 'cmd', 'com', 'cgi', 'pl', 'py',
+    ];
+
+    /**
+     * The content to write for an imported media/resource file, or null when the
+     * file must be skipped. Refuses forbidden extensions and sanitises
+     * SVG content the same way the upload path does, so imported files get the
+     * same safeguards as uploaded ones.
+     */
+    private function safeMediaContent(string $sourcePath, string $fileName): ?string {
+        $ext = strtolower(pathinfo($fileName, PATHINFO_EXTENSION));
+        if ($ext === '' || in_array($ext, self::IMPORT_FORBIDDEN_EXTENSIONS, true)) {
+            return null;
+        }
+
+        $content = file_get_contents($sourcePath);
+        if ($content === false) {
+            return null;
+        }
+
+        if ($ext === 'svg' || $ext === 'svgz') {
+            try {
+                return $this->mediaSanitizer->sanitizeSVG($content);
+            } catch (\Throwable $e) {
+                // A malformed / unsanitisable SVG is dropped, not written raw.
+                return null;
+            }
+        }
+
+        return $content;
     }
 
     /**
@@ -1215,32 +1280,6 @@ class ImportService {
             $this->logger->warning('Failed to trigger groupfolder scan: ' . $e->getMessage());
         }
     }
-
-    /**
-     * Cleanup temporary directory
-     *
-     * @param string $dir Directory to cleanup
-     */
-    private function cleanupTempDir(string $dir): void {
-        if (!is_dir($dir)) {
-            return;
-        }
-
-        $files = new \RecursiveIteratorIterator(
-            new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS),
-            \RecursiveIteratorIterator::CHILD_FIRST
-        );
-
-        foreach ($files as $file) {
-            if ($file->isDir()) {
-                @rmdir($file->getPathname());
-            } else {
-                @unlink($file->getPathname());
-            }
-        }
-        @rmdir($dir);
-    }
-
 
     /**
      * Find the folder path for a page by its uniqueId

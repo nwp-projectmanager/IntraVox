@@ -67,6 +67,27 @@ class PermissionService {
     private array $permissionArrayCache = [];
 
     /**
+     * Per-request memo of getPermissions() results, keyed by "userId|relativePath".
+     *
+     * getPermissions() → calculatePermissions() → applyAclRules() reconstructs the
+     * ACL decision from the raw group_folders_acl/filecache/storages tables on every
+     * call, with NO caching — unlike permissionsFromNode(), which reads the bits the
+     * groupfolders mount already applied to the Node. filterNavigation() calls
+     * getPermissions() once per menu item, and NavigationController renders the menu
+     * TWICE for editors (menu + editor variant), so a 40-item tree recomputed the
+     * whole raw-SQL pass ~80×. The result is a pure function of (userId, path) within
+     * a request (nav-get performs no filesystem writes between the two passes), so it
+     * memoises trivially.
+     *
+     * The key MUST include userId: keying by path alone would serve user A's ACL
+     * bits to user B, breaking the per-user GroupFolder ACL guarantee. Flushed by
+     * {@see clearNodePermissionsCache()} on the same mutation hook as its siblings.
+     *
+     * @var array<string, int>
+     */
+    private array $permissionResultCache = [];
+
+    /**
      * Per-request memo of the groupfolder id, keyed by mount point name.
      * Uses array_key_exists, not isset: a resolved-to-null answer must be
      * cached too, otherwise a broken install re-walks every groupfolder on
@@ -223,10 +244,20 @@ class PermissionService {
             return 0;
         }
 
+        // Per-request memo, keyed by (userId, path). The ACL decision below is a
+        // pure function of those two within a request; without this, every
+        // filterNavigation item — and every editor second pass — re-ran the full
+        // raw-SQL ACL reconstruction. Keyed by userId so one user's bits are never
+        // served to another (the SACRED per-user ACL guarantee).
+        $memoKey = $userId . '|' . $relativePath;
+        if (isset($this->permissionResultCache[$memoKey])) {
+            return $this->permissionResultCache[$memoKey];
+        }
+
         try {
             $perms = $this->calculatePermissions($relativePath, $userId);
             $this->logger->info("[PermissionService] Final permissions for '{$relativePath}': {$perms}");
-            return $perms;
+            return $this->permissionResultCache[$memoKey] = $perms;
         } catch (\Exception $e) {
             $this->logger->error('Failed to get permissions for path ' . $relativePath . ': ' . $e->getMessage());
             return 0;
@@ -240,8 +271,12 @@ class PermissionService {
      * 1. Get base permissions from GroupFolder group membership
      * 2. Apply ACL rules (if ACL app is enabled)
      * 3. Child paths cannot have more permissions than parent paths
+     *
+     * Protected (not private) so the per-request memo in getPermissions() can be
+     * pinned with a counting seam, the same way resolveGroupFolderId() is opened
+     * for the fail-closed test — rather than widening it into the public surface.
      */
-    private function calculatePermissions(string $relativePath, string $userId): int {
+    protected function calculatePermissions(string $relativePath, string $userId): int {
         $folderId = $this->getGroupFolderId();
         if ($folderId === null) {
             // Fail CLOSED. This used to return PERMISSION_ALL "if groupfolders
@@ -562,19 +597,59 @@ class PermissionService {
     }
 
     /**
+     * Check if user administers the team folder IntraVox lives in.
+     *
+     * Import and export act on the whole folder -- every language, every page,
+     * drafts and ACL-restricted subtrees included -- so the per-path ACL that
+     * guards /api/pages/* cannot express who may do them. The question is who
+     * administers the container, and groupfolders answers it already:
+     * FolderManager::canManageACL(). This is deliberately NOT a new IntraVox
+     * role; the multi-site design is explicit that structural permissions
+     * belong to "the administrator of that team folder" and that IntraVox adds
+     * no authorisation layer of its own.
+     *
+     * Note this is wider than the NC admin group it replaces: a delegated
+     * folder manager who is not a Nextcloud admin now qualifies. That is the
+     * point. It is far narrower than what shipped before, which was every
+     * logged-in account on the instance.
+     *
+     * Fails closed. Renaming the IntraVox team folder makes the id
+     * unresolvable, which denies everyone rather than granting anyone --
+     * logged by resolveGroupFolderId().
+     */
+    private function canManageIntraVoxFolder(?string $userId = null): bool {
+        $userId = $userId ?? $this->userId;
+        if (!$userId) {
+            return false;
+        }
+
+        $user = $this->userManager->get($userId);
+        if (!$user) {
+            return false;
+        }
+
+        $folderId = $this->getGroupFolderId();
+        if ($folderId === null) {
+            return false;
+        }
+
+        return $this->groupFolders->canManageAcl($folderId, $user);
+    }
+
+    /**
      * Check if user can import content.
-     * Requires system admin privileges.
+     * Requires administering the IntraVox team folder.
      */
     public function canImport(?string $userId = null): bool {
-        return $this->isSystemAdmin($userId);
+        return $this->canManageIntraVoxFolder($userId);
     }
 
     /**
      * Check if user can export all content.
-     * Requires system admin privileges for full export.
+     * Requires administering the IntraVox team folder.
      */
     public function canExport(?string $userId = null): bool {
-        return $this->isSystemAdmin($userId);
+        return $this->canManageIntraVoxFolder($userId);
     }
 
     /**
@@ -659,6 +734,56 @@ class PermissionService {
     }
 
     /**
+     * Permissions for a folder path relative to the IntraVox root, resolved
+     * through the user's mounted folder view so GroupFolder ACLs apply.
+     *
+     * Moved verbatim from PageService (permission-shell step 1): the permission
+     * decision "resolve the mounted IntraVox folder and derive ACL perms" belongs
+     * with the service that owns permissionsFromNode/permissionsForPage.
+     * PageService keeps a thin delegator for its ~12 callers.
+     *
+     * @param string $relativePath e.g. "en/about" or "" for the root
+     * @return array{canRead:bool,canWrite:bool,canCreate:bool,canDelete:bool,canShare:bool,raw:int}
+     */
+    public function getFolderPermissions(string $relativePath): array {
+        try {
+            if (!$this->userId) {
+                return [
+                    'canRead' => false,
+                    'canWrite' => false,
+                    'canCreate' => false,
+                    'canDelete' => false,
+                    'canShare' => false,
+                    'raw' => 0
+                ];
+            }
+
+            // Get user's folder (this respects GroupFolder ACL)
+            $userFolder = $this->rootFolder->getUserFolder($this->userId);
+
+            // Get IntraVox folder from user's perspective (mounted GroupFolder)
+            $intraVoxPath = 'IntraVox';
+            if (!empty($relativePath)) {
+                $intraVoxPath .= '/' . ltrim($relativePath, '/');
+            }
+
+            $folder = $userFolder->get($intraVoxPath);
+            return $this->permissionsFromNode($folder);
+        } catch (\Exception $e) {
+            // If folder doesn't exist, return no permissions
+            $this->logger->debug('getFolderPermissions failed for path: ' . $relativePath . ' - ' . $e->getMessage());
+            return [
+                'canRead' => false,
+                'canWrite' => false,
+                'canCreate' => false,
+                'canDelete' => false,
+                'canShare' => false,
+                'raw' => 0
+            ];
+        }
+    }
+
+    /**
      * Permissions for a single page, where "write" is gated on the page FILE and
      * the remaining capabilities describe operations on the page FOLDER.
      *
@@ -678,12 +803,13 @@ class PermissionService {
     }
 
     /**
-     * Drop the per-request node permission cache. Called by
-     * PageService::clearCache() whenever the filesystem view mutates.
+     * Drop the per-request permission caches whenever the filesystem view
+     * mutates. Invoked via PageCacheInvalidator on create/update/delete.
      */
     public function clearNodePermissionsCache(): void {
         $this->nodePermissionsCache = [];
         $this->permissionArrayCache = [];
+        $this->permissionResultCache = [];
     }
 
     /**
@@ -769,9 +895,20 @@ class PermissionService {
                     $pagePath = $pagePathMap[$item['uniqueId']];
                 }
 
-                // If we have a path, check permissions
+                // If we have a path, check read access via the user's mounted
+                // folder view (getFolderPermissions → permissionsFromNode) rather
+                // than the raw-SQL canRead()/getPermissions() path. Both yield the
+                // SAME read decision — proven byte-identical for canRead across two
+                // users incl. a per-user ACL deny on a nested subtree (the
+                // ACL-equivalence gate) — but the node view reads the bits the
+                // groupfolders mount already applied (~0.4ms/node, request-memoised
+                // by permissionArrayCache) instead of reconstructing the ACL from
+                // group_folders_acl/filecache/storages per path segment (~3.3ms/item,
+                // the bulk of the 379ms nav render). A denied node makes get() throw,
+                // which getFolderPermissions maps to canRead=false — the correct,
+                // fail-closed outcome.
                 if ($pagePath !== null) {
-                    if (!$this->canRead($pagePath)) {
+                    if (!$this->getFolderPermissions($pagePath)['canRead']) {
                         $includeItem = false;
                     }
                 }

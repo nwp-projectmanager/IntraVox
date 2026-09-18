@@ -4,7 +4,6 @@ declare(strict_types=1);
 namespace OCA\IntraVox\Controller;
 
 use OCA\IntraVox\Service\AnalyticsService;
-use OCA\IntraVox\Service\PageService;
 use OCP\AppFramework\Controller;
 use OCP\AppFramework\Http;
 use OCP\AppFramework\Http\Attribute\NoAdminRequired;
@@ -28,6 +27,7 @@ use Psr\Log\LoggerInterface;
 class AnalyticsController extends Controller {
     use ChecksAdminAccess;
     use ApiErrorTrait;
+    use RequiresPagePermission;
 
     private const APP_ID = 'intravox';
 
@@ -35,7 +35,7 @@ class AnalyticsController extends Controller {
         string $appName,
         IRequest $request,
         private AnalyticsService $analyticsService,
-        private PageService $pageService,
+        private \OCA\IntraVox\Service\Read\PageReadService $pageRead,
         private IUserSession $userSession,
         private IGroupManager $groupManager,
         private IConfig $config,
@@ -51,6 +51,26 @@ class AnalyticsController extends Controller {
         return $this->logger;
     }
 
+    protected function getPageReadService(): \OCA\IntraVox\Service\Read\PageReadService {
+        return $this->pageRead;
+    }
+
+    /**
+     * Resolve a page and require the current user may READ it. Returns a
+     * DataResponse (404 when absent, 403 when denied) that the caller must
+     * return, or null when access is granted. Existence alone is not enough:
+     * checking only pageExistsByUniqueId let a user read/inflate the view
+     * counts of ACL-restricted pages they cannot see.
+     */
+    private function denyUnlessReadablePage(string $pageId): ?DataResponse {
+        try {
+            $page = $this->pageRead->getPage($pageId);
+        } catch (\Exception $e) {
+            return $this->notFoundResponse('Page not found');
+        }
+        return $this->denyUnlessReadable($page);
+    }
+
 
     /**
      * Get statistics for a specific page
@@ -64,9 +84,9 @@ class AnalyticsController extends Controller {
     #[NoCSRFRequired]
     public function getPageStats(string $pageId, int $days = 30): DataResponse {
         try {
-            // Verify page exists and user has access
-            if (!$this->pageService->pageExistsByUniqueId($pageId)) {
-                return $this->notFoundResponse('Page not found');
+            // Require READ permission, not mere existence.
+            if (($denied = $this->denyUnlessReadablePage($pageId)) !== null) {
+                return $denied;
             }
 
             // Limit days to reasonable range
@@ -107,7 +127,7 @@ class AnalyticsController extends Controller {
             $enrichedPages = [];
             foreach ($topPages as $page) {
                 try {
-                    $pageData = $this->pageService->getPage($page['pageId']);
+                    $pageData = $this->pageRead->getPage($page['pageId']);
                     // Only include pages user can read
                     if ($pageData['permissions']['canRead'] ?? false) {
                         $page['title'] = $pageData['title'] ?? 'Untitled';
@@ -156,7 +176,7 @@ class AnalyticsController extends Controller {
             $enrichedTopPages = [];
             foreach ($stats['topPages'] as $page) {
                 try {
-                    $pageData = $this->pageService->getPage($page['pageId']);
+                    $pageData = $this->pageRead->getPage($page['pageId']);
                     if ($pageData['permissions']['canRead'] ?? false) {
                         $page['title'] = $pageData['title'] ?? 'Untitled';
                         $enrichedTopPages[] = $page;
@@ -236,9 +256,10 @@ class AnalyticsController extends Controller {
     #[NoAdminRequired]
     public function trackView(string $pageId): DataResponse {
         try {
-            // Verify page exists
-            if (!$this->pageService->pageExistsByUniqueId($pageId)) {
-                return $this->notFoundResponse('Page not found');
+            // Require READ permission, not mere existence: a user who
+            // cannot see the page must not be able to inflate its view count.
+            if (($denied = $this->denyUnlessReadablePage($pageId)) !== null) {
+                return $denied;
             }
 
             $tracked = $this->analyticsService->trackPageView($pageId);

@@ -6,6 +6,141 @@ IntraVox is a Nextcloud intranet page builder.
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-09-16 — The page engine, taken apart, and hardened
+
+A structural release: the page engine was taken apart, and almost nothing about
+using IntraVox changes. The version is 3.0.0 because the internals moved
+wholesale, not because the app does anything new.
+
+Alongside the refactor, IntraVox went through a full security review, and this
+release includes the resulting hardening across access control, sharing, media
+handling, import and the feed and directory integrations. The details below are
+kept deliberately general.
+
+Two reported behaviours *do* change, both of them things that were wrong:
+Nextcloud admins are no longer forced back into "IntraVox Admins" on every
+update (#113), and feed items without a link no longer behave like broken ones
+(#114). Everything else should look and work exactly as 2.7.1 did.
+
+### Security
+
+A security review led to a set of hardening changes. None require any action
+when upgrading, and none change how content is stored. In summary:
+
+- **Access control is enforced consistently on every endpoint.** Reading,
+  editing, locking, analytics, template management, page comments and the news
+  feed all check the caller's permissions on the specific page or resource, and
+  respect Team folder Advanced Permissions (ACLs) and a page's publication state
+  (draft, scheduled or expired). Export and import now require administering the
+  Team folder IntraVox lives in, rather than being available to any account.
+
+- **Public shares only expose what the sharer can see.** Every share endpoint —
+  the page tree, page and media content, news and navigation — is served through
+  the share owner's own ACL-filtered view, so a folder share never republishes
+  pages or files an ACL hides from the person who shared it. Share widgets that
+  read from a configured connection are limited to the data the share actually
+  publishes.
+
+- **Uploaded and imported media are handled safely.** Files served to the
+  browser use the correct content type and disposition, SVGs are sanitised, and
+  ZIP imports apply the same file-type restrictions and sanitisation as a normal
+  upload. Template, media and share identifiers are validated to keep file
+  access within IntraVox's own folders.
+
+- **Integrations require IntraVox access and do not leak internals.** The feed
+  and people/directory endpoints require IntraVox access, the OAuth callback is
+  bound to the session that started it, the outbound image proxy stays restricted
+  to signed, external addresses, and error responses no longer expose internal
+  details. Server-side identifiers for new pages are always assigned by the
+  server.
+
+These were found during our own review before release; there is no indication of
+any of them having been exploited.
+
+### Changed
+
+- **Export and import are now for Team folder administrators, not only
+  Nextcloud admins.** Both used to require membership of the server's `admin`
+  group. That was the wrong question: they act on the whole folder, so what
+  matters is who administers *that folder* — which Nextcloud already answers
+  through the Team folder's "Manage advanced permissions". A delegated manager
+  can now export and import without being a server administrator, continuing
+  where the "IntraVox Admins" change below leaves off
+  ([#113](https://github.com/nextcloud/IntraVox/issues/113)): managing knowledge
+  and administering a server stay different jobs.
+
+  Nextcloud admins keep access, so nothing is taken away from an existing
+  installation. Note that this is an API-level change: the export and import
+  screens still live in the Nextcloud admin settings, so a delegated manager
+  reaches them through the API rather than that page for now.
+
+### Fixed
+
+- **Pages loaded again after the split.** `FolderContext` resolved the user's
+  home directory instead of the mounted IntraVox Team folder, because the
+  dependency container filled a seam meant only for tests. The app rendered
+  with no pages at all — HTTP 200, nothing in the log. It now refuses to be
+  built that way.
+
+- **`occ` commands work again.** The same class captured the user id when the
+  container built it, but `occ` sets the user during `execute()`, long after.
+  Every command that touches pages — `intravox:reindex`, `intravox:import`,
+  `intravox:repair-entities` — failed with "User not logged in". The user is
+  now resolved when asked for, not when constructed.
+
+- **Nextcloud admins are no longer permanently IntraVox admins.**
+  ([#113](https://github.com/nextcloud/IntraVox/issues/113)) Setup seeded every
+  member of the `admin` group into "IntraVox Admins" and granted `admin` full
+  rights on the Team folder. Both were re-applied on *every app update*, because
+  setup runs as a repair step — so removing someone worked until the next update
+  put them back. The intent was sound: an installation whose owner leaves should
+  not become unmanageable. Enforcing it forever was not, because managing
+  knowledge and administering a server are different jobs, held by different
+  people.
+
+  Provisioning now happens once. Existing installations keep exactly the access
+  they have — the first run after upgrading still seeds — and only the
+  overwriting stops. After that, removing someone from "IntraVox Admins", or
+  setting the `admin` group to read-only on the Team folder, sticks. Both are
+  done in the Team folders interface; IntraVox simply stops overruling it.
+
+  This is not a security boundary, and is not meant as one: a Nextcloud admin
+  can always add themselves back. What changes is that they no longer get it by
+  default.
+
+- **Feed items without a link no longer navigate back to the page they sit on.**
+  ([#114](https://github.com/nextcloud/IntraVox/issues/114)) An item whose
+  connection returned no URL rendered as `<a href="">`, and an empty `href`
+  resolves to the current document — so clicking it reloaded the IntraVox page,
+  looking like a broken link rather than an absent one. Such items are now plain
+  text. This affects any custom connection whose URL mapping comes back empty.
+
+- **Team folder ACLs are still honoured after the split.**
+  ([#112](https://github.com/nextcloud/IntraVox/issues/112)) The 2.7.1 fix
+  scoped page-tree and News cache entries per user when Advanced Permissions
+  are on. That fix lived in `PageService`, which this release deletes, so it
+  was re-applied by hand to the services that inherited the caches. An
+  integration test now asserts both call sites, because a hand-carried security
+  fix is exactly the kind that gets dropped.
+
+### Added
+
+- **An integration suite that actually runs.** 33 tests against a real
+  Nextcloud with real Team folders, exercising the folder resolution and ACL
+  paths that unit tests cannot reach — they stub the filesystem away. It runs
+  in CI against Nextcloud 32, 33, 34 and 35.
+
+  The three bugs above were all invisible to 1321 passing unit tests. Two of
+  them shipped an empty app.
+
+### Compatibility
+
+Nextcloud 32–35, PHP 8.2 or newer. Note that Nextcloud 35 itself requires PHP
+8.3, so that combination needs 8.3 regardless of what this app asks for.
+
+Upgrading is a normal app update: no migration, no configuration change, and
+no change to how content is stored on disk.
+
 ## [2.7.1] - 2026-09-07 — Team folder ACLs are honoured where they were not
 
 ### Fixed
@@ -763,7 +898,7 @@ Sites with a single content language see no translation features anywhere.
 
 - **Draft no longer promises more than it delivers.** The status keeps the name **Draft** (consistent with the rest of the industry and with how it is stored), but the wording now states plainly that it is a *visibility filter, not a permission*: the page is hidden from readers everywhere in IntraVox, while the page file itself keeps the folder's normal Nextcloud rights. Editing a draft page shows this as a standard Nextcloud info note card; the status badges carry a short, state-specific tooltip.
 
-- **The editor documentation spells out where a draft page is still reachable.** It previously claimed a draft was "completely invisible to readers", which was only true inside IntraVox. The guide (EN + NL) now lists the routes that bypass the filter — Files/WebDAV, Unified and full-text search, the activity stream and notifications, versions and trash, Collabora, sync clients and MetaVox metadata — and advises restricting the folder with Team folder permissions for genuinely confidential content.
+- **The editor documentation is clearer about what "draft" does and does not hide.** It previously claimed a draft was "completely invisible to readers", which was only true inside IntraVox: the draft status hides a page within IntraVox's own views, but the underlying file still lives in the Team folder and can be reached through Nextcloud's own features. The guide (EN + NL) now explains this and advises restricting the folder with Team folder permissions for genuinely confidential content, rather than relying on draft status alone.
 
 - **The details sidebar (ⓘ) is now reachable while editing.** It was hidden in edit mode, so setting a page's *Publish on* date — which lives in the sidebar's MetaVox tab — meant leaving the editor first.
 
@@ -1113,7 +1248,7 @@ Major release. Introduces two new widgets — **Photo Story** for photo gallerie
 ### Performance
 
 - **Paged enumeration** via `oc_filecache` for all primary widget modes — no more full-tree `getDirectoryListing()` on large libraries. Hard caps (5000 cross-folder, 20k filtered, 200k count) prevent OOM on massive folders.
-- **Federated detection** is one preloaded SQL query per request, O(1) lookups per file. The previous `IMountManager::findIn('/')` per-file approach (cause of the 2026-05-27 saturation incident on nc-dev) is gone.
+- **Federated detection** is one preloaded SQL query per request, O(1) lookups per file. The previous `IMountManager::findIn('/')` per-file approach, which did not scale on large libraries, is gone.
 - **`clusters`, `highlights` and `on-this-day` endpoints** now go through `listPhotosPaged` with sane caps instead of the unpaged legacy path that risked the same blast radius as the federated-detect outage.
 - **`filterFileIdsByScope` collapsed** from `chunks × scopes` SQL roundtrips to one ORed `WHERE` per chunk — at filtered-MetaVox-page scale this drops ~400 queries per page to ~40.
 - **`extractGroupfolderId`** memoised per node within a request.

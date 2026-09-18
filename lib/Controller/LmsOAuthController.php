@@ -189,6 +189,20 @@ class LmsOAuthController extends Controller {
         try {
             $tokens = $this->oauthService->handleCallback($code, $state);
 
+            // The state is HMAC-signed and single-use, but it is bound to the
+            // user who STARTED the flow — not to the session that FINISHES it.
+            // The session that finishes the flow must be the one it was started
+            // for, otherwise a token could be linked to the wrong account
+            // (OAuth account-linking CSRF). Refuse unless the session user matches
+            // the user the state was issued for.
+            if ($this->userId === null || $tokens['userId'] !== $this->userId) {
+                $this->logger->warning('[LmsOAuthController] OAuth state user does not match session user', [
+                    'stateUser' => $tokens['userId'],
+                    'sessionUser' => $this->userId,
+                ]);
+                return $this->oauthPopupResponse(false, 'This authorization does not belong to your session.');
+            }
+
             $expiresAt = null;
             if (isset($tokens['expires_in']) && $tokens['expires_in'] > 0) {
                 $expiresAt = new \DateTime('+' . $tokens['expires_in'] . ' seconds');
